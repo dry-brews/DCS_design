@@ -8,13 +8,11 @@ Created on Wed Mar 17 15:52:47 2021
 
 To-do list:
     Change file_out to prefix for all files out
-    Write IDT-formatted file that can be submitted to opool
-    Write .tsv with orthogonal primers and the things they demultiplex
     Write .txt with all orthogonal sticky-ends for NEB analysis
     Make separate script for writing orthogonal primer pools for demultiplexing
 """
 import sys
-def main(template_file, leader, tail, ortho_primers_file, output_file, tile_len, assm_file):
+def main(template_file, leader, tail, ortho_primers_file, output_file, tile_len, assm_file, dils_file):
     template_name, template_seq = read_fasta(template_file)
     
     tiles, template_codons, ortho_db, file_out = initialize_variables(template_seq, ortho_primers_file, tile_len, output_file)
@@ -52,6 +50,13 @@ def main(template_file, leader, tail, ortho_primers_file, output_file, tile_len,
     sys.stderr.write("Total assemblies to perform: %s\n" % assembly_count)
     
     define_amplifications(oligos_file = output_file, assemblies_file = assm_file, amps_file = "amps_out.tsv")
+    define_seq_pools(assemblies_file = assm_file, tiles = tiles, output_file=dils_file)
+    print(tiles)
+    sys.stderr.write("Sequencing length starting from each tile:\n")
+    for t in tiles:
+        if t > len(tiles)-3:
+            break
+        sys.stderr.write("tile %s:\t%s\n" % (t+1, 3*(tiles[t+2]['end_break']-tiles[t]['start_break'])))
     
 def initialize_variables(template_seq, ortho_primers_file, tile_len, output_file):    
     
@@ -501,11 +506,177 @@ def define_amplifications(oligos_file, assemblies_file, amps_file):
             amps_out.write("%s\t%s\t%s\t%s\n" % (o, oligos_dict[o]["oligos"], oligos_dict[o]["ortho"], oligos_dict[o]["assms"]))
     return None
 
-
-
-
-
-
+def define_seq_pools(assemblies_file, tiles, output_file = "dils_out.tsv"):
+    #initalize pools
+    pool1_free_tiles = []
+    pool2_free_tiles = []
+    pool3_free_tiles = []
+    
+    for t in tiles:
+        if t+1 == len(tiles):
+            pass
+        elif (t+1) % 3 == 0:
+            pool1_free_tiles.append(t+1)
+        elif (t+1) % 3 == 1:
+            pool2_free_tiles.append(t+1)
+        elif (t+1) % 3 == 2:
+            pool3_free_tiles.append(t+1)
+    
+    lib_mut_cutoff = 2000
+    pool1_sm_assms = []
+    pool2_sm_assms = []
+    pool3_sm_assms = []
+    pool1_lg_assms = []
+    pool2_lg_assms = []
+    pool3_lg_assms = []
+    
+    pool1_sm_muts = []
+    pool2_sm_muts = []
+    pool3_sm_muts = []
+    pool1_lg_muts = []
+    pool2_lg_muts = []
+    pool3_lg_muts = []
+    
+    #assign assemblies to pools
+    with open(assemblies_file,'r') as assms_in:
+        lc = 0
+        for line in assms_in:
+            lc +=1
+            if lc ==1:
+                continue
+            else:
+                off_limits_tiles = []
+                fragments = line.split('\t')[1].split('|')
+                muts = int(line.strip().split('\t')[-1])
+                for f in fragments:
+                    if f.startswith("W") or f.startswith("SMJ") or f.startswith("JJM"):
+                        continue
+                    elif f.startswith("DMJ"):
+                        off_limits_tiles.append(int(f.split('t')[-1]))
+                        off_limits_tiles.append(int(f.split('t')[-1])+1)
+                    else:
+                        off_limits_tiles.append(int(f.split('t')[-1]))
+                
+                pool1_check = True
+                for t in off_limits_tiles:
+                    if t in pool1_free_tiles:
+                        pool1_check = False
+                        break
+                if pool1_check == True:
+                    if muts > lib_mut_cutoff:
+                        pool1_lg_assms.append(line.split('\t')[0])
+                        pool1_lg_muts.append(muts)
+                        continue
+                    else:
+                        pool1_sm_assms.append(line.split('\t')[0])
+                        pool1_sm_muts.append(muts)                        
+                        pass
+                
+                pool2_check = True
+                for t in off_limits_tiles:
+                    if t in pool2_free_tiles:
+                        pool2_check = False
+                        break
+                if pool2_check == True:
+                    if muts > lib_mut_cutoff:
+                        pool2_lg_assms.append(line.split('\t')[0])
+                        pool2_lg_muts.append(muts)
+                        continue
+                    else:
+                        pool2_sm_assms.append(line.split('\t')[0])
+                        pool2_sm_muts.append(muts)                        
+                        pass
+                
+                pool3_check = True
+                for t in off_limits_tiles:
+                    if t in pool3_free_tiles:
+                        pool3_check = False
+                        break
+                if pool3_check == True:
+                    if muts > lib_mut_cutoff:
+                        pool3_lg_assms.append(line.split('\t')[0])
+                        pool3_lg_muts.append(muts)
+                        continue
+                    else:
+                        pool3_sm_assms.append(line.split('\t')[0])
+                        pool3_sm_muts.append(muts)                        
+                        pass
+                
+                if pool1_check == False and pool2_check == False and pool3_check == False:
+                    sys.stderr.write("failed to assign tile to a pool: %s\n exiting..." % line.split('\t')[1])
+                    sys.exit()
+    #print(sum(pool1_sm_muts), sum(pool2_sm_muts), sum(pool3_sm_muts))
+    #print(sum(pool1_lg_muts), sum(pool2_lg_muts), sum(pool3_lg_muts))
+    
+    #Write guide for diluting libraries into six pools
+    comb_libs = ["Pool1_sm_assm", "Pool1_lg_assm", 
+                 "Pool2_sm_assm", "Pool2_lg_assm", 
+                 "Pool3_sm_assm", "Pool3_lg_assm"]
+    comb_lib_muts = []
+    comb_lib_vols = []
+    
+    with open(output_file,'w+') as output:
+        output.write("Pool1_sm_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool1_sm_assms)):  
+            vols.append(pool1_sm_muts[i] / max(pool1_sm_muts) * 5)
+            output.write("%s\t%s\t%s\n" % (pool1_sm_assms[i], pool1_sm_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool1_sm_muts), round(sum(vols),2)))
+        comb_lib_muts.append(sum(pool1_sm_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+        
+        output.write("Pool1_lg_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool1_lg_assms)):  
+            vols.append(pool1_lg_muts[i] / max(pool1_lg_muts) * 10)
+            output.write("%s\t%s\t%s\n" % (pool1_lg_assms[i], pool1_lg_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool1_lg_muts), round(sum(vols),2))) 
+        comb_lib_muts.append(sum(pool1_lg_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+    
+        output.write("Pool2_sm_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool2_sm_assms)):  
+            vols.append(pool2_sm_muts[i] / max(pool2_sm_muts) * 5)
+            output.write("%s\t%s\t%s\n" % (pool2_sm_assms[i], pool2_sm_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool2_sm_muts), round(sum(vols),2)))
+        comb_lib_muts.append(sum(pool2_sm_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+    
+        
+        output.write("Pool2_lg_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool2_lg_assms)):  
+            vols.append(pool2_lg_muts[i] / max(pool2_lg_muts) * 10)
+            output.write("%s\t%s\t%s\n" % (pool2_lg_assms[i], pool2_lg_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool2_lg_muts), round(sum(vols),2)))
+        comb_lib_muts.append(sum(pool2_lg_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+    
+        output.write("Pool3_sm_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool3_sm_assms)):  
+            vols.append(pool3_sm_muts[i] / max(pool3_sm_muts) * 5)
+            output.write("%s\t%s\t%s\n" % (pool3_sm_assms[i], pool3_sm_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool3_sm_muts), round(sum(vols),2)))
+        comb_lib_muts.append(sum(pool3_sm_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+    
+        output.write("Pool3_lg_assm\tmuts\tvolume(uL)\n")
+        vols = []
+        for i in range(len(pool3_lg_assms)):  
+            vols.append(pool3_lg_muts[i] / max(pool3_lg_muts) * 10)
+            output.write("%s\t%s\t%s\n" % (pool3_lg_assms[i], pool3_lg_muts[i], round(vols[i], 2)))
+        output.write("total\t%s\t%s\n\n" % (sum(pool3_lg_muts), round(sum(vols),2)))
+        comb_lib_muts.append(sum(pool3_lg_muts))
+        comb_lib_vols.append(round(sum(vols),2))
+        
+        output.write("Final_pools\tmuts\tvolume(uL)\n")
+        for i in range(len(comb_libs)):
+            output.write("%s\t%s\t%s\n" %(comb_libs[i], comb_lib_muts[i], comb_lib_vols[i]))
+        output.write("total\t%s\t%s\n" % (sum(comb_lib_muts), round(sum(comb_lib_vols),2)))
+    
+    return None
 
 if __name__ == "__main__":
     import sys
@@ -557,6 +728,12 @@ if __name__ == "__main__":
                       dest = 'assm_out',
                       default = "assm_out.tsv",
                       help = "File to write planned assemblies to")
+    parser.add_option('--dils',
+                      action = 'store',
+                      type = 'string',
+                      dest = 'dils_file',
+                      default = "dils_out.tsv",
+                      help = "File to write planned dilutions to")
     (option, args) = parser.parse_args()
     
-    main(option.template_file, option.leader, option.tail, option.ortho_primers_file, option.output_file, option.tile_len, option.assm_out)
+    main(option.template_file, option.leader, option.tail, option.ortho_primers_file, option.output_file, option.tile_len, option.assm_out, option.dils_file)
